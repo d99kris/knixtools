@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# livecd-install.sh v0.2
+# livecd-install.sh v0.3
 #
 # Copyright (C) 2023 Kristofer Berggren
 # All rights reserved.
@@ -11,7 +11,7 @@
 # The script is not intended for production VM installations of Linux distros,
 # nor for physical systems as it uses BIOS boot instead of EFI.
 #
-# Supported distros: Void
+# Supported distros: Gentoo, Void
 #
 # Usage:
 #   bash <(curl -sL https://nope.se/li.sh) [OPTIONS]
@@ -45,16 +45,21 @@ user_check() {
   [[ "${REPLY}" != "" ]] && USER="${REPLY}"
   read -s -p "Set user password (${PASS}): "
   [[ "${REPLY}" != "" ]] && PASS="${REPLY}"
+  echo ""
 }
 
 distro_check() {
-  if [[ "${DISTRO}" != "Void" ]]; then
+  if [[ "${DISTRO}" != "Void" ]] && \
+     [[ "${DISTRO}" != "Gentoo" ]]; then
     exiterr "unsupported linux distro (${NAME})"
   fi
 }
 
 setup_deps() {
   if [[ "${DISTRO}" == "Void" ]]; then
+    xbps-remove -vROo || exiterr "Failed to cleanup packages"
+    xbps-install -y -u xbps || exiterr "Failed to update xbps"
+    xbps-install -y -Su || exiterr "Failed to update packages"
     [[ -x "$(command -v parted)" ]] || xbps-install -y parted || exiterr "Failed to install parted"
     [[ -x "$(command -v rsync)" ]] || xbps-install -y rsync || exiterr "Failed to install rsync"
   fi
@@ -87,17 +92,17 @@ perform_install() {
   (mkdir ${MNTROOT} && mount ${ROOT} ${MNTROOT} -o bind) || exiterr "Mount ${ROOT} failed"
 
   # Copy Live-image to hard drive
-  rsync -a --info=progress2 --no-i-r ${MNTROOT}/ ${MNTDISK}/
+  rsync -a --info=progress2 --no-i-r ${MNTROOT}/ ${MNTDISK}/ || exiterr "Copy disk failed"
 
   # Install and update Grub
   unset UUID
   eval $(blkid | grep "^${PARTITION}" | awk '{print $2}')
   echo "UUID=${UUID}	/	ext4	defaults	0	2" >> ${MNTDISK}/etc/fstab
-  grub-install --root-directory=${MNTDISK} ${DEVICE}
+  grub-install --root-directory=${MNTDISK} ${DEVICE} || exiterr "Grub install failed"
   mount --bind /dev ${MNTDISK}/dev || exiterr "Mount /dev failed"
   mount --bind /proc ${MNTDISK}/proc || exiterr "Mount /proc failed"
   mount --bind /sys ${MNTDISK}/sys || exiterr "Mount /sys failed"
-  chroot ${MNTDISK} update-grub || exiterr "Update Grub failed"
+  chroot ${MNTDISK} grub-mkconfig -o /boot/grub/grub.cfg || exiterr "Grub config failed"
 
   # Add user
   chroot ${MNTDISK} useradd --create-home ${USER} || exiterr "User add failed"
