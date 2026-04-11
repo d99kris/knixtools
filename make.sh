@@ -136,6 +136,7 @@ if [[ "${DOC}" == "1" ]]; then
     fi
   }
   # utils with man-pages
+  mkman "nspell-gpt" "terminal-based spell checking using ChatGPT"
   mkman "tenv" "toggle python virtual environment"
   mkman "sget" "install software from source packages"
 fi
