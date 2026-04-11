@@ -136,7 +136,7 @@ if [[ "${DOC}" == "1" ]]; then
     fi
   }
   # utils with man-pages
-  #mkman "cvc" "common version control"
+  mkman "sget" "install software from source packages"
 fi
 
 # install_help
