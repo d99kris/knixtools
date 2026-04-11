@@ -24,6 +24,7 @@ Tools Listing
 | cvc           | [src](/bin/cvc)           | Git/svn wrapper                 |
 | liveinstall   | [src](/bin/liveinstall)   | [Doc](/doc/liveinstall.md)      |
 | pipdeps       | [src](/bin/pipdeps)       | Auto-install pip packages       |
+| tenv          | [src](/bin/tenv)          | [Doc](/doc/tenv.md)             |
 | sget          | [src](/bin/sget)          | [Doc](/doc/sget.md)             |
 
 

@@ -23,6 +23,7 @@ endmacro()
 add_script(cvc)
 add_script(liveinstall)
 add_script(pipdeps)
+add_script(tenv)
 add_script(sget)
 
 # Uninstall
