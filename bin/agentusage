@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+
+# Copyright (c) 2026 Kristofer Berggren
+# All rights reserved.
+#
+# agentusage is distributed under the MIT license.
+
+set -euo pipefail
+
+AU_VER="0.05"
+
+help()
+{
+  echo "Agentusage is a small utility to set up Claude Code slash commands"
+  echo "(/save and /load) for persisting session transcripts across projects"
+  echo "in a single directory."
+  echo ""
+  echo "Usage: agentusage --setup <store-dir>"
+  echo "   or: agentusage --help"
+  echo "   or: agentusage --version"
+  echo ""
+  echo "Options:"
+  echo "   -s, --setup <dir>  set up agentusage with given store directory,"
+  echo "                      where it will store agent transcripts."
+  echo "   -h, --help         display this help and exit"
+  echo "   -v, --version      output version information and exit"
+}
+
+version()
+{
+  echo "agentusage v${AU_VER}"
+  echo ""
+  echo "Copyright (c) 2026 Kristofer Berggren"
+  echo ""
+  echo "agentusage is distributed under the MIT license."
+  echo ""
+  echo "Written by Kristofer Berggren"
+}
+
+main()
+{
+  if [[ "${#}" == "0" ]]; then
+    help
+    exit 1
+  fi
+
+  while [[ ${#} -gt 0 ]]; do
+    case "${1%/}" in
+      -h|--help)
+        help
+        exit 0
+        ;;
+
+      -v|--version)
+        version
+        exit 0
+        ;;
+
+      -s|--setup)
+        shift
+        if [[ "${1:-}" == "" ]]; then
+          help
+          exit 1
+        else
+          setup "${1}"
+          shift
+        fi
+        ;;
+
+      *)
+        >&2 echo "unknown argument: ${1}"
+        help
+        exit 1
+        ;;
+    esac
+    shift
+  done
+}
+
+exiterr()
+{
+  >&2 echo "${1}"
+  exit 1
+}
+
+configure_permissions()
+{
+  local STOREDIR="${1}"
+  local SETTINGS_FILE="${HOME}/.claude/settings.json"
+
+  # Rules with absolute path (matches when Claude uses full path)
+  local READ_RULE="Read(//${STOREDIR}/**)"
+  local EDIT_RULE="Edit(//${STOREDIR}/**)"
+  local GLOB_RULE="Glob(//${STOREDIR}/**)"
+  local GREP_RULE="Grep(//${STOREDIR}/**)"
+
+  # Rules with tilde path (matches when Claude uses ~/... shorthand)
+  local TILDE_DIR="${STOREDIR/#$HOME/'~'}"
+  local TILDE_READ_RULE="Read(${TILDE_DIR}/**)"
+  local TILDE_EDIT_RULE="Edit(${TILDE_DIR}/**)"
+  local TILDE_GLOB_RULE="Glob(${TILDE_DIR}/**)"
+  local TILDE_GREP_RULE="Grep(${TILDE_DIR}/**)"
+
+  if ! command -v python3 &>/dev/null; then
+    echo "Note: python3 not found. To avoid permission prompts, add to ${SETTINGS_FILE}:"
+    echo "  \"permissions\": { \"allow\": [\"${READ_RULE}\", \"${EDIT_RULE}\", \"${GLOB_RULE}\", \"${GREP_RULE}\", \"${TILDE_READ_RULE}\", \"${TILDE_EDIT_RULE}\", \"${TILDE_GLOB_RULE}\", \"${TILDE_GREP_RULE}\"] }"
+    return
+  fi
+
+  python3 - "${SETTINGS_FILE}" "${READ_RULE}" "${EDIT_RULE}" "${GLOB_RULE}" "${GREP_RULE}" "${TILDE_READ_RULE}" "${TILDE_EDIT_RULE}" "${TILDE_GLOB_RULE}" "${TILDE_GREP_RULE}" <<'PYEOF'
+import json, os, sys
+
+settings_file = sys.argv[1]
+rules = sys.argv[2:]
+
+data = {}
+if os.path.exists(settings_file):
+    with open(settings_file, 'r') as f:
+        data = json.load(f)
+
+allow = data.setdefault('permissions', {}).setdefault('allow', [])
+
+changed = False
+for rule in rules:
+    if rule not in allow:
+        allow.append(rule)
+        changed = True
+
+if changed:
+    with open(settings_file, 'w') as f:
+        json.dump(data, f, indent=2)
+        f.write('\n')
+    print("Updated " + settings_file + " with permissions for store directory")
+else:
+    print("Permissions already configured in " + settings_file)
+PYEOF
+}
+
+setup()
+{
+  STOREDIR="${1}"
+  if [[ ! -d "${STOREDIR}" ]]; then
+    exiterr "not a directory: ${STOREDIR}"
+  fi
+
+  STOREDIR="$(cd "${STOREDIR}" && pwd)"
+
+  mkdir -p "${HOME}/.claude/commands"
+
+  configure_permissions "${STOREDIR}"
+
+  tee "${HOME}/.claude/commands/save.md" > /dev/null <<EOF
+Save a session transcript for future agents/sessions.
+
+## Steps
+
+1. Run \`date +%Y%m%d-%H%M%S\` to get the current date and time.
+
+2. Determine the current project name by running \`git rev-parse --show-toplevel | xargs basename\`.
+
+3. Derive a short kebab-case topic slug from the main subject of this session
+   (e.g. \`thread-safety-analysis\`, \`startup-performance-improvements\`).
+
+4. Compose the filename: \`${STOREDIR}/<projectname>/YYYYMMDD-HHMMSS-<slug>.md\` using the date-time from step 1 and project name from step 2.
+
+5. Write a full session transcript to the path from step 4 using the Write tool (it creates parent directories automatically).
+   Reproduce the entire conversation as completely and verbatim as possible.
+   Do not include secrets, credentials, or API keys — redact them as \`[REDACTED]\`.
+
+   Format the transcript as follows:
+
+   \`\`\`
+   # <Title>
+
+   ## Session Info
+   - Date: YYYY-MM-DD
+   - Branch: \`<branch-name>\`
+
+   ## Transcript
+
+   ### User
+   <user message, verbatim>
+
+   ### Assistant
+   <assistant response, verbatim — include tool calls and their results>
+
+   ### User
+   <next user message>
+
+   ...and so on for the entire conversation.
+   \`\`\`
+
+   Guidelines:
+   - Preserve the full content of each message — do not summarize or abbreviate.
+   - Include tool invocations and their results (file reads, bash commands, edits, etc.)
+     as fenced code blocks with the tool name, e.g. \`\`\`bash\`, \`\`\`read\`, etc.
+   - For /load and /save commands, only log the final output reported to the user,
+     not the intermediate tool calls (git pulls, file reads, mkdir, etc.).
+   - If earlier parts of the conversation have been compressed or truncated by the
+     system, reproduce what is available and note \`[earlier context compressed]\`
+     at the top.
+   - There is no length limit — capture the full session.
+
+6. Report the saved filename to the user.
+EOF
+
+  tee "${HOME}/.claude/commands/load.md" > /dev/null <<EOF
+Load session transcripts, optionally filtered by keyword(s).
+
+## Steps
+
+1. Determine the current project name by running \`git rev-parse --show-toplevel | xargs basename\`.
+
+2. Use the Glob tool to find all \`.md\` files in \`${STOREDIR}/<projectname>/\`
+   (pattern: \`*.md\`, path: \`${STOREDIR}/<projectname>\`).
+   IMPORTANT: Use the exact absolute path above — do not shorten it with ~ or \$HOME.
+   If no files are found, inform the user that no session transcripts exist for this
+   project yet and suggest using /save to create one.
+
+3. If \`\$ARGUMENTS\` is non-empty, use the Grep tool to search for documents matching the words
+   in \`${STOREDIR}/<projectname>/\`. Use the exact absolute path — do not use ~ or \$HOME.
+   Take the 5 most recent matches and read them for context.
+
+4. If \`\$ARGUMENTS\` is empty:
+   - If there are more than 5 documents, list them by filename and ask the user
+     which ones to load, or offer to load the 5 most recent.
+   - Otherwise, read all found documents for context.
+EOF
+}
+
+main "${@}"
