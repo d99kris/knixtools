@@ -1,14 +1,57 @@
-# knixtools - kris *nix tools
+knixtools
+=========
 
-A repository to hold various Linux/macOS development tools (shell-scripts
-primarily) that are too small to each have their own repository.
+| **Linux** | **Mac** |
+|-----------|---------|
+| [![Linux](https://github.com/d99kris/knixtools/workflows/Linux/badge.svg)](https://github.com/d99kris/knixtools/actions?query=workflow%3ALinux) | [![macOS](https://github.com/d99kris/knixtools/workflows/macOS/badge.svg)](https://github.com/d99kris/knixtools/actions?query=workflow%3AmacOS) |
 
-## bin
+knixtools (kris *nix tools) is a repository for small Linux/macOS development
+tools (shell-scripts primarily) that are too small to each have their own
+repository.
 
-### livecd-install.sh
 
-Install a Live CD/DVD to the hard drive, enabling quick VM setup for dev/test.
-Usage:
+Supported Platforms
+===================
 
-    bash <(curl -sL https://nope.se/li.sh)
+knixtools is primarily developed on macOS and Linux.
 
+
+Tools Listing
+=============
+
+| **Name**      | **Source**                | **Description**                 |
+|---------------|---------------------------|---------------------------------|
+| cvc           | [src](/bin/cvc)           | Git/svn wrapper                 |
+| liveinstall   | [src](/bin/liveinstall)   | [Doc](/doc/liveinstall.md)      |
+| pipdeps       | [src](/bin/pipdeps)       | Auto-install pip packages       |
+
+
+Installation
+============
+
+Download the source code:
+
+    git clone https://github.com/d99kris/knixtools && cd knixtools
+
+Install:
+
+    ./make.sh install
+
+
+License
+=======
+
+knixtools is distributed under the MIT license. See LICENSE file.
+
+
+Contributions
+=============
+
+Bug reports are welcome, but feature requests and pull requests are generally
+not entertained.
+
+
+Keywords
+========
+
+unix, linux, macos, util, shell tools.
