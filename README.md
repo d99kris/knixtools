@@ -21,6 +21,7 @@ Tools Listing
 
 | **Name**      | **Source**                | **Description**                 |
 |---------------|---------------------------|---------------------------------|
+| 7zetools      | [src](/bin/)              | [Doc](/doc/7zetools.md)         |
 | cvc           | [src](/bin/cvc)           | Git/svn wrapper                 |
 | liveinstall   | [src](/bin/liveinstall)   | [Doc](/doc/liveinstall.md)      |
 | nspell-gpt    | [src](/bin/nspell-gpt)    | [Doc](/doc/nspell-gpt.md)       |

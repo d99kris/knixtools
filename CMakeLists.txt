@@ -20,6 +20,13 @@ macro(add_script name)
 endmacro()
 
 # Scripts
+add_script(7zcd)
+add_script(7zdec)
+add_script(7zenc)
+add_script(7zfind)
+add_script(7zlist)
+add_script(7zopen)
+add_script(7zpass)
 add_script(cvc)
 add_script(liveinstall)
 add_script(nspell-gpt)

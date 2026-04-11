@@ -136,6 +136,13 @@ if [[ "${DOC}" == "1" ]]; then
     fi
   }
   # utils with man-pages
+  mkman "7zcd" "7-Zip change directory"
+  mkman "7zdec" "7-Zip decrypt"
+  mkman "7zenc" "7-Zip encrypt"
+  mkman "7zfind" "7-Zip find"
+  mkman "7zlist" "7-Zip list"
+  mkman "7zopen" "7-Zip open"
+  mkman "7zpass" "7-Zip pass"
   mkman "nspell-gpt" "terminal-based spell checking using ChatGPT"
   mkman "tenv" "toggle python virtual environment"
   mkman "sget" "install software from source packages"
