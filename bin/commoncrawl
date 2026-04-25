@@ -1,0 +1,539 @@
+#!/usr/bin/env python3
+
+# commoncrawl
+#
+# Copyright (c) 2026 Kristofer Berggren
+# All rights reserved.
+#
+# commoncrawl is distributed under the MIT license.
+#
+# Query Common Crawl's CDX index by fetching gzipped shards directly from S3
+# (via data.commoncrawl.org HTTPS), bypassing the overloaded CDX HTTP API.
+# Uses cluster.idx + byte-range reads of cdx-*.gz. Zero AWS credentials.
+# This is the approach Common Crawl maintainers recommend for scripts that
+# would otherwise hammer index.commoncrawl.org:
+#   https://groups.google.com/g/common-crawl/c/3QmQjFA_3y4
+#   https://groups.google.com/g/common-crawl/c/cwtFIB5-7Hc
+
+CC_VERSION = "0.01"
+
+# ----------------------------------------------------------------------------
+# pipdeps: auto-install pip packages into a shared venv under ~/.cache/pipdeps
+# (embedded from https://github.com/d99kris/knixtools/blob/master/bin/pipdeps)
+# ----------------------------------------------------------------------------
+def pipdeps(pkgs):
+    import os, sys, subprocess, venv, importlib.metadata
+    HOME = os.environ.get("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache"))
+    VENVDIR = os.path.join(HOME, "pipdeps", "venv")
+    vpython = os.path.join(VENVDIR, "bin", "python")
+    if not os.path.exists(vpython):
+        venv.EnvBuilder(with_pip=True, clear=True).create(VENVDIR)
+    pyver = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    sitepkgs = os.path.join(VENVDIR, "lib", pyver, "site-packages")
+    sys.path.insert(0, sitepkgs)
+    missing = []
+    for pkg in pkgs:
+        try:
+            importlib.metadata.distribution(pkg)
+        except importlib.metadata.PackageNotFoundError:
+            missing.append(pkg)
+    if missing:
+        print(f"Installing missing packages: {', '.join(missing)}")
+        subprocess.check_call([vpython, "-m", "pip", "install"] + missing)
+
+pipdeps(["requests", "warcio"])
+
+# ----------------------------------------------------------------------------
+
+import argparse
+import bisect
+import gzip
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from io import BytesIO
+from urllib.parse import urlparse
+
+import requests
+from warcio.archiveiterator import ArchiveIterator
+
+
+COLLINFO_URL = "https://index.commoncrawl.org/collinfo.json"
+DATA_BASE = "https://data.commoncrawl.org/"
+CACHE_ROOT = os.path.join(
+    os.environ.get("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")),
+    "commoncrawl",
+)
+
+# Peak years have ~12 crawls at ~100 MB each; 1.5 GB covers one year + margin.
+DEFAULT_CACHE_LIMIT_MB = 1500
+
+SESSION = requests.Session()
+
+
+def get_crawls():
+    """Fetch collinfo.json, falling back to a local cached copy if the index
+    server is unreachable. The crawl list is append-only so stale data is safe."""
+    cache_path = os.path.join(CACHE_ROOT, "collinfo.json")
+    try:
+        r = SESSION.get(COLLINFO_URL, timeout=30)
+        r.raise_for_status()
+        os.makedirs(CACHE_ROOT, exist_ok=True)
+        with open(cache_path, "wb") as f:
+            f.write(r.content)
+        return r.json()
+    except (requests.RequestException, ValueError) as e:
+        if os.path.exists(cache_path):
+            age_days = (time.time() - os.path.getmtime(cache_path)) / 86400
+            print(f"  [warn] {COLLINFO_URL} unreachable ({type(e).__name__}); "
+                  f"using cached copy ({age_days:.0f} day(s) old)")
+            with open(cache_path, "rb") as f:
+                return json.loads(f.read())
+        raise
+
+
+def filter_crawls(crawls, date_from=None, date_to=None, limit=None):
+    def to_yyyymmdd(s):
+        digits = re.sub(r"\D", "", s or "")
+        return digits[:8] if digits else None
+    out = []
+    for c in crawls:
+        cfrom = to_yyyymmdd(c.get("from")) or "00000000"
+        cto = to_yyyymmdd(c.get("to")) or "99999999"
+        if date_from and cto < date_from:
+            continue
+        if date_to and cfrom > date_to:
+            continue
+        out.append(c)
+    if limit is not None:
+        out = out[:limit]
+    return out
+
+
+def canonical_host(host):
+    # CC's SURT strips leading "www." label.
+    host = host.lower().split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def surt_prefix(url, match_type):
+    """Build the SURT-key prefix that hits should start with."""
+    p = urlparse(url)
+    host = canonical_host(p.netloc or p.path)
+    path = p.path or "/"
+    host_surt = ",".join(reversed(host.split(".")))
+    if match_type == "exact":
+        # Full SURT key for this URL, including trailing space so we match
+        # the space-terminated SURT field in the CDX line.
+        return f"{host_surt}){path} "
+    if match_type == "prefix":
+        return f"{host_surt}){path}"
+    if match_type == "host":
+        return f"{host_surt})"
+    if match_type == "domain":
+        # Also matches subdomains: com,example,* as well as com,example)
+        return host_surt
+    raise ValueError(f"unknown match type: {match_type}")
+
+
+def cluster_idx_dir():
+    d = os.path.join(CACHE_ROOT, "cluster-idx")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def evict_cache(keep_crawl_ids, limit_bytes):
+    """Delete least-recently-used cluster.idx files until total cache size is
+    under limit_bytes. Never touches files for crawls in keep_crawl_ids."""
+    d = cluster_idx_dir()
+    keep = {f"{cid}.idx" for cid in keep_crawl_ids}
+    files = []
+    for name in os.listdir(d):
+        if not name.endswith(".idx"):
+            continue
+        path = os.path.join(d, name)
+        try:
+            st = os.stat(path)
+        except FileNotFoundError:
+            continue
+        files.append((name, path, st.st_size, st.st_mtime))
+
+    total = sum(f[2] for f in files)
+    if total <= limit_bytes:
+        return
+
+    # Evict oldest-first among files not needed for this run.
+    evictable = sorted((f for f in files if f[0] not in keep), key=lambda f: f[3])
+    removed = 0
+    for name, path, size, _ in evictable:
+        if total - removed <= limit_bytes:
+            break
+        try:
+            os.remove(path)
+            removed += size
+            print(f"  [cache] evicted {name} ({size/1e6:.0f} MB)")
+        except OSError:
+            pass
+
+
+def load_cluster_idx(crawl_id):
+    """Download (with local cache) cluster.idx for a crawl; return sorted list
+    of (surt_key, shard_filename, byte_offset, byte_length)."""
+    cache_path = os.path.join(cluster_idx_dir(), f"{crawl_id}.idx")
+    if not os.path.exists(cache_path):
+        url = f"{DATA_BASE}cc-index/collections/{crawl_id}/indexes/cluster.idx"
+        sys.stdout.write(f"    fetching cluster.idx ... ")
+        sys.stdout.flush()
+        r = SESSION.get(url, timeout=120)
+        r.raise_for_status()
+        tmp = cache_path + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(r.content)
+        os.replace(tmp, cache_path)
+        sys.stdout.write(f"{len(r.content):,} bytes\n")
+    else:
+        # Mark as recently used for LRU eviction.
+        os.utime(cache_path, None)
+
+    entries = []
+    with open(cache_path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 5:
+                continue
+            surt = parts[0].split(" ", 1)[0]
+            entries.append((surt, parts[1], int(parts[2]), int(parts[3])))
+    return entries
+
+
+def clusters_for_prefix(entries, prefix):
+    """Return the sublist of cluster.idx entries whose surt range overlaps
+    [prefix, prefix + '\\uffff')."""
+    keys = [e[0] for e in entries]
+    # Cluster containing the left boundary: last entry with key <= prefix
+    lo = bisect.bisect_right(keys, prefix) - 1
+    if lo < 0:
+        lo = 0
+    # Exclusive upper bound: first cluster whose start exceeds any matching key
+    upper = prefix + "￿"
+    hi = bisect.bisect_left(keys, upper)
+    return entries[lo:max(hi, lo + 1)]
+
+
+def fetch_cluster_lines(crawl_id, shard, offset, length):
+    """Byte-range fetch one cluster (a standalone gzip member) and return its
+    uncompressed lines."""
+    url = f"{DATA_BASE}cc-index/collections/{crawl_id}/indexes/{shard}"
+    headers = {"Range": f"bytes={offset}-{offset + length - 1}"}
+    r = SESSION.get(url, headers=headers, timeout=120)
+    r.raise_for_status()
+    return gzip.decompress(r.content).decode("utf-8", "replace").splitlines()
+
+
+def parse_cdx_line(line):
+    """CDX line: '<surt> <timestamp> <json>'. Returns (surt, timestamp, dict) or None."""
+    try:
+        surt, ts, rest = line.split(" ", 2)
+    except ValueError:
+        return None
+    try:
+        rec = json.loads(rest)
+    except json.JSONDecodeError:
+        return None
+    rec["timestamp"] = ts
+    return surt, ts, rec
+
+
+def query_crawl(crawl_id, url, match_type,
+                date_from=None, date_to=None, status_filter="200"):
+    """Query one crawl via its cluster.idx + cdx shards. Returns list of hit dicts."""
+    sys.stdout.write(f"  {crawl_id:20} ... ")
+    sys.stdout.flush()
+
+    entries = load_cluster_idx(crawl_id)
+    prefix = surt_prefix(url, match_type)
+    # For match=exact we built a prefix with a trailing space; strip it when
+    # searching cluster.idx (whose keys are just SURTs).
+    search_prefix = prefix.rstrip(" ")
+    candidates = clusters_for_prefix(entries, search_prefix)
+
+    hits = []
+    for _, shard, offset, length in candidates:
+        try:
+            lines = fetch_cluster_lines(crawl_id, shard, offset, length)
+        except requests.RequestException as e:
+            sys.stdout.write(f"[cluster fetch failed: {e}] ")
+            continue
+        for line in lines:
+            if not line.startswith(prefix):
+                continue
+            parsed = parse_cdx_line(line)
+            if parsed is None:
+                continue
+            _, ts, rec = parsed
+            if date_from and ts < date_from:
+                continue
+            if date_to and ts > date_to + "999999"[: 14 - len(date_to)]:
+                continue
+            if status_filter and rec.get("status") != status_filter:
+                continue
+            hits.append(rec)
+
+    sys.stdout.write(f"{len(hits)} hit(s) (scanned {len(candidates)} cluster(s))\n")
+    return hits
+
+
+def fetch_warc_record(rec):
+    filename = rec["filename"]
+    offset = int(rec["offset"])
+    length = int(rec["length"])
+    url = DATA_BASE + filename
+    headers = {"Range": f"bytes={offset}-{offset + length - 1}"}
+    r = SESSION.get(url, headers=headers, timeout=120)
+    r.raise_for_status()
+    stream = BytesIO(r.content)
+    for record in ArchiveIterator(stream):
+        if record.rec_type == "response":
+            return record.http_headers, record.content_stream().read()
+    return None, None
+
+
+def sanitize(s, maxlen=120):
+    s = re.sub(r"[^\w\-.]+", "_", s).strip("_")
+    return (s or "index")[:maxlen]
+
+
+def save_snapshot(rec, outdir):
+    _http_headers, body = fetch_warc_record(rec)
+    if body is None:
+        return None
+    ts = rec.get("timestamp", "unknown")
+    parts = urlparse(rec.get("url", ""))
+    name_path = sanitize((parts.netloc + parts.path).rstrip("/") or "index")
+    filename = f"{ts}__{name_path}.html"
+    full = os.path.join(outdir, filename)
+    with open(full, "wb") as f:
+        f.write(body)
+    return full
+
+
+def parse_selection(s, n):
+    s = s.strip().lower()
+    if s in ("q", "quit", "exit", ""):
+        return None
+    if s == "all":
+        return list(range(n))
+    picks = set()
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            a, b = int(a), int(b)
+            for i in range(min(a, b), max(a, b) + 1):
+                if 1 <= i <= n:
+                    picks.add(i - 1)
+        else:
+            i = int(part)
+            if 1 <= i <= n:
+                picks.add(i - 1)
+    return sorted(picks)
+
+
+def prompt_selection(n):
+    print()
+    print("Select snapshots to download.")
+    print("  Indices (e.g. '1,3,5'), a range ('2-7'), 'all', or 'q' to quit.")
+    while True:
+        try:
+            s = input("> ")
+        except (EOFError, KeyboardInterrupt):
+            return None
+        try:
+            return parse_selection(s, n)
+        except ValueError:
+            print("  invalid input, try again.")
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        prog="commoncrawl",
+        description=(
+            "Query Common Crawl's CDX index and interactively download snapshots.\n"
+            "Fetches gzipped CDX shards directly from S3 (data.commoncrawl.org),\n"
+            "bypassing the overloaded index.commoncrawl.org HTTP API."
+        ),
+        epilog=(
+            "Examples:\n"
+            "   commoncrawl 'https://example.com/' --match exact --crawls 1\n"
+            "       latest crawl only, exact URL match\n"
+            "\n"
+            "   commoncrawl 'https://example.com/' --match host --from 20200101\n"
+            "       any capture of a URL on example.com since 2020\n"
+            "\n"
+            "Report bugs at https://github.com/d99kris/knixtools"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("-v", "--version", action="version",
+                    version=(
+                        f"commoncrawl v{CC_VERSION}\n"
+                        f"\n"
+                        f"Copyright (c) 2026 Kristofer Berggren\n"
+                        f"\n"
+                        f"commoncrawl is distributed under the MIT license.\n"
+                        f"\n"
+                        f"Written by Kristofer Berggren"
+                    ))
+    ap.add_argument("url", help="URL to look up")
+    ap.add_argument("--match", choices=["exact", "prefix", "host", "domain"],
+                    default="prefix",
+                    help="Match type (default: prefix)")
+    ap.add_argument("--from", dest="date_from", default=None,
+                    help="Earliest timestamp YYYYMMDD (inclusive); "
+                         "Common Crawl data begins 20080509")
+    ap.add_argument("--to", dest="date_to", default=None,
+                    help="Latest timestamp YYYYMMDD (inclusive)")
+    ap.add_argument("--crawls", type=int, default=None,
+                    help="Only check the N most recent crawls in the date range")
+    ap.add_argument("--status", default="200",
+                    help="Filter by HTTP status (default: 200, pass '' to disable)")
+    ap.add_argument("--outdir", default="cc_snapshots",
+                    help="Output directory (default: ./cc_snapshots)")
+    ap.add_argument("--no-dedup", action="store_true",
+                    help="Show every capture, not deduped by content digest")
+    ap.add_argument("--limit", type=int, default=20,
+                    help="Max captures to display (default: 20, 0 = no limit)")
+    ap.add_argument("--cache-limit", type=int, default=DEFAULT_CACHE_LIMIT_MB,
+                    help=f"Max cluster.idx cache size in MB "
+                         f"(default: {DEFAULT_CACHE_LIMIT_MB}); oldest entries "
+                         f"are evicted first")
+    ap.add_argument("--browser", default=None,
+                    help="Browser to open each saved snapshot with "
+                         "(default: $BROWSER, or w3m if unset)")
+    ap.add_argument("--download-only", action="store_true",
+                    help="Save snapshots to disk without opening them")
+    args = ap.parse_args()
+
+    os.makedirs(args.outdir, exist_ok=True)
+
+    print("Fetching list of Common Crawl archives...")
+    try:
+        all_crawls = get_crawls()
+    except requests.RequestException as e:
+        print(f"  [error] cannot reach {COLLINFO_URL} ({type(e).__name__}) "
+              f"and no local cache is present.")
+        print("  index.commoncrawl.org is likely down; retry later once a cache "
+              "is available. See https://groups.google.com/g/common-crawl")
+        return 1
+    crawls = filter_crawls(all_crawls, args.date_from, args.date_to, args.crawls)
+    if not crawls:
+        print("No crawls match the requested date range.")
+        return 1
+
+    print(f"Querying {len(crawls)} crawl(s) for: {args.url}")
+    print(f"  match={args.match} from={args.date_from or '-'} "
+          f"to={args.date_to or '-'} status={args.status or 'any'}")
+    print()
+
+    evict_cache({c["id"] for c in crawls}, args.cache_limit * 1024 * 1024)
+
+    hits = []
+    for c in crawls:
+        try:
+            res = query_crawl(c["id"], args.url, args.match,
+                              args.date_from, args.date_to, args.status)
+        except requests.RequestException as e:
+            print(f"    [skipped: {e}]")
+            continue
+        for r in res:
+            r["_crawl"] = c["id"]
+            hits.append(r)
+
+    if not hits:
+        print("\nNo matches found in any crawl.")
+        return 1
+
+    hits.sort(key=lambda r: r.get("timestamp", ""))
+
+    if args.no_dedup:
+        display = hits
+    else:
+        seen = {}
+        for h in hits:
+            d = h.get("digest") or id(h)
+            if d in seen:
+                seen[d]["_dup_count"] = seen[d].get("_dup_count", 1) + 1
+            else:
+                h["_dup_count"] = 1
+                seen[d] = h
+        display = sorted(seen.values(), key=lambda r: r.get("timestamp", ""))
+
+    total_unique = len(display)
+    if args.limit > 0 and total_unique > args.limit:
+        display = display[:args.limit]
+
+    print()
+    dedup_note = "" if args.no_dedup else f" ({total_unique} unique by digest)"
+    print(f"Found {len(hits)} capture(s){dedup_note}:")
+    if len(display) < total_unique:
+        print(f"  showing first {len(display)} — pass --limit N (or --limit 0 "
+              f"for all) to see more")
+    print(f"{'#':>4}  {'timestamp':14}  {'st':>3}  {'length':>8}  {'dups':>4}  url")
+    for i, r in enumerate(display, 1):
+        print(f"{i:>4}  {r.get('timestamp',''):14}  "
+              f"{r.get('status','?'):>3}  {str(r.get('length','?')):>8}  "
+              f"{r.get('_dup_count',1):>4}  {r.get('url','')}")
+
+    picks = prompt_selection(len(display))
+    if picks is None:
+        print("Quit.")
+        return 0
+    if not picks:
+        print("Nothing selected.")
+        return 0
+
+    browser = None
+    if not args.download_only:
+        browser = args.browser or os.environ.get("BROWSER") or "w3m"
+        if shutil.which(browser) is None:
+            print(f"  [warn] browser {browser!r} not found on PATH; skipping open")
+            browser = None
+
+    print()
+    for i in picks:
+        rec = display[i]
+        print(f"[{i+1}/{len(display)}] {rec.get('timestamp')} {rec.get('url')}")
+        try:
+            path = save_snapshot(rec, args.outdir)
+            if path:
+                print(f"    saved {os.path.getsize(path)} bytes -> {path}")
+            else:
+                print("    [warn] no response record found in WARC slice")
+                continue
+        except Exception as e:
+            print(f"    [error] {e}")
+            continue
+
+        if browser:
+            try:
+                subprocess.run([browser, path], check=False)
+            except OSError as e:
+                print(f"    [warn] failed to open in {browser}: {e}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+        sys.exit(130)
