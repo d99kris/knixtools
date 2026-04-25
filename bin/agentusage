@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-AU_VER="0.05"
+AU_VER="0.06"
 
 help()
 {
@@ -228,4 +228,4 @@ Load session transcripts, optionally filtered by keyword(s).
 EOF
 }
 
-main "${@}"
+main "${@:-}"
