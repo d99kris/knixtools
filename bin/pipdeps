@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# pipdeps v0.11
+# pipdeps v0.12
 #
 # Copyright (c) 2025 Kristofer Berggren
 # All rights reserved.
@@ -13,9 +13,10 @@ def pipdeps(pkgs):
 
     HOME = os.environ.get("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache"))
     VENVDIR = os.path.join(HOME, "pipdeps", "venv")
+    vpython = os.path.join(VENVDIR, "bin", "python")
 
-    if not os.path.exists(VENVDIR):
-        venv.EnvBuilder(with_pip=True).create(VENVDIR)
+    if not os.path.exists(vpython):
+        venv.EnvBuilder(with_pip=True, clear=True).create(VENVDIR)
 
     pyver = f"python{sys.version_info.major}.{sys.version_info.minor}"
     sitepkgs = os.path.join(VENVDIR, "lib", pyver, "site-packages")
@@ -29,9 +30,8 @@ def pipdeps(pkgs):
             missing.append(pkg)
 
     if missing:
-        pip = os.path.join(VENVDIR, "bin", "pip")
         print(f"Installing missing packages: {', '.join(missing)}")
-        subprocess.check_call([pip, "install"] + missing)
+        subprocess.check_call([vpython, "-m", "pip", "install"] + missing)
 
 
 # Example usage, installs the listed packages and prints their versions
