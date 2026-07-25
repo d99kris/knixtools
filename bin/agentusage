@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-AU_VER="0.07"
+AU_VER="0.08"
 
 help()
 {
@@ -223,6 +223,34 @@ Load session transcripts, optionally filtered by keyword(s).
    - If there are more than 5 documents, list them by filename and ask the user
      which ones to load, or offer to load the 5 most recent.
    - Otherwise, read all found documents for context.
+EOF
+
+  tee "${HOME}/.claude/commands/draft.md" > /dev/null <<'EOF'
+Draft a commit message for the current changeset. Do NOT commit — this is
+for the operator to review, test, and commit themselves.
+
+Determine the changeset:
+- If the working tree has uncommitted changes (staged, unstaged, or
+  untracked), that is the changeset. Inspect with `git status` and
+  `git diff` / `git diff --staged`.
+- Otherwise, if on a non-default branch, the changeset is the branch's
+  commits vs the default branch (`git diff <default>...HEAD`,
+  `git log <default>..HEAD`).
+- If the tree is clean and we are on the default branch, say there is
+  nothing to draft and stop.
+
+Then output exactly:
+
+Description:
+<2-3 sentences describing the changes for the operator; up to 4-5 for a
+larger changeset. Keep it tight.>
+
+Commit message draft:
+<a single-line message matching the style/tense/format of this repo's
+recent commits — check `git log -20 --oneline` first>
+
+If it could reasonably be phrased more than one way, add up to two
+alternative one-liners beneath the first.
 EOF
 }
 
