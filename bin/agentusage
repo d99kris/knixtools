@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-AU_VER="0.08"
+AU_VER="0.09"
 
 help()
 {
@@ -251,6 +251,48 @@ recent commits — check `git log -20 --oneline` first>
 
 If it could reasonably be phrased more than one way, add up to two
 alternative one-liners beneath the first.
+EOF
+
+  tee "${HOME}/.claude/commands/cpp-review.md" > /dev/null <<'EOF'
+Review C++ changes for correctness, performance and concistency. Argument: optional path to a text file describing intended functionality (e.g. `desc.txt`). If provided, also verify the changes fulfill that description.
+
+## Changeset
+
+Determine what to review:
+- If the working tree has uncommitted changes (staged, unstaged, or untracked): review those. Use `git diff` / `git diff --staged` / `git status`.
+- Otherwise, if on a non-default branch: review the branch diff vs the base branch (`git diff <base>...HEAD`).
+- If clean and on the default branch: say there is nothing to review and stop.
+
+## Description check (only if argument provided)
+
+Read the file at the path given as argument. Verify the code changes satisfy the described functionality or fix. Report any gaps or mismatches as findings.
+
+## Review dimensions
+
+For each finding, emit an entry in the Output format described below. If clean, say so.
+
+**Correctness**: Logic errors, UB, use-after-free, overflow, uninitialized reads, races, missing error handling at boundaries.
+
+**Performance**: Unnecessary copies (prefer const& or move), redundant allocs, O(n²) vs O(n), repeated lookups.
+
+**Consistency**: Code style shall be consistent with surrounding code / code in same file.
+
+## Output format
+
+Report each issue found in the following exact format, with one blank line between issues:
+
+```
+filepath:lineno **[severity]** `[category]`
+Description of the issue
+```
+
+Where:
+- `filepath:lineno` - in code span format style
+- **[severity]** — bold severity in square brackets: **[high]**, **[medium]**, or **[low]**.
+- `[category]` — the review dimension as a code span, e.g. `[correctness]`, `[performance]`, `[constness]`, `[style]`.
+- Description — a concise explanation on the following line(s); include a short suggested fix or code snippet where helpful.
+
+Order findings most severe first. End with a summary line with an overall assessment.
 EOF
 }
 
