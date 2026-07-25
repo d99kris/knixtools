@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# dotfiles-get - update knixtools bin/ scripts from locally developed dotfiles
+#
+# Copies files from ../dotfiles/common/bin into bin/, but only those that
+# already exist in bin/, thus bringing knixtools up-to-date with dotfiles.
+
+set -e
+
+# Run from repository root (parent of this script's utils/ dir).
+cd "$(dirname "${0}")/.."
+
+SRC="../dotfiles/common/bin"
+DST="bin"
+
+if [[ ! -d "${SRC}" ]]; then
+  echo "dotfiles-get: ${SRC} not found, skipping"
+  exit 0
+fi
+
+for DSTFILE in "${DST}"/*; do
+  NAME="$(basename "${DSTFILE}")"
+  SRCFILE="${SRC}/${NAME}"
+  if [[ -f "${SRCFILE}" ]]; then
+    cp "${SRCFILE}" "${DSTFILE}"
+    echo "updated ${NAME}"
+  fi
+done
