@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# cvc v0.28
+# cvc v0.29
 #
 # Copyright (c) 2018-2026 Kristofer Berggren
 # All rights reserved.
@@ -406,6 +406,8 @@ git_log()
   # Git log
   if [[ "${2}" == "-v" ]]; then
     git --no-pager log --reverse --name-only ${@:3}
+  elif [[ "${2}" == "-1" ]]; then
+    git --no-pager log --reverse --date=format:'%Y-%m-%d %H:%M:%S' --pretty=tformat:'%h | %al | %ad | %s' ${@:3}
   else
     git --no-pager log --reverse ${@:2}
   fi
@@ -595,7 +597,14 @@ git_switchbranch()
 git_up()
 {
   # Git update
-  git pull --prune --rebase --autostash
+  git pull --prune --rebase --autostash || exit ${?}
+
+  # Prune orphan branches if requested
+  if [[ "${2}" == "-p" ]]; then
+    git for-each-ref --format '%(refname:short) %(upstream:track)' refs/heads \
+      | awk '$2 == "[gone]" {print $1}' \
+      | xargs -r git branch -D
+  fi
 
   # Propagate exit status
   exit ${?}
@@ -837,6 +846,8 @@ svn_log()
 {
   if [[ "${2}" != "" ]] && [[ ${2} == -r* || ${2} == -c* ]]; then
     svn log ${@:2}
+  elif [[ "${2}" == "-1" ]]; then
+    svn log -r1:HEAD ${@:3} | perl -pe 's/\n/ /g; s/--+/\n/g; s/ \+\d{4} \([^)]+\)//; s/\| \d+ lines? +/| /'
   else
     svn log -r1:HEAD ${@:2}
   fi
@@ -1178,7 +1189,7 @@ case "${1}" in
     echo "cvc re        revert local file change"
     echo "cvc st        status"
     echo "cvc sy        sync changes from other repository"
-    echo "cvc up        update"
+    echo "cvc up [-p]   update (optional prune)"
     echo "cvc ur        remote clone url"
     echo "cvc lb        list branches"
     echo "cvc nb        new branch"
