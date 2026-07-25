@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-AU_VER="0.06"
+AU_VER="0.07"
 
 help()
 {
@@ -91,23 +91,21 @@ configure_permissions()
   # Rules with absolute path (matches when Claude uses full path)
   local READ_RULE="Read(//${STOREDIR}/**)"
   local EDIT_RULE="Edit(//${STOREDIR}/**)"
-  local GLOB_RULE="Glob(//${STOREDIR}/**)"
   local GREP_RULE="Grep(//${STOREDIR}/**)"
 
   # Rules with tilde path (matches when Claude uses ~/... shorthand)
   local TILDE_DIR="${STOREDIR/#$HOME/'~'}"
   local TILDE_READ_RULE="Read(${TILDE_DIR}/**)"
   local TILDE_EDIT_RULE="Edit(${TILDE_DIR}/**)"
-  local TILDE_GLOB_RULE="Glob(${TILDE_DIR}/**)"
   local TILDE_GREP_RULE="Grep(${TILDE_DIR}/**)"
 
   if ! command -v python3 &>/dev/null; then
     echo "Note: python3 not found. To avoid permission prompts, add to ${SETTINGS_FILE}:"
-    echo "  \"permissions\": { \"allow\": [\"${READ_RULE}\", \"${EDIT_RULE}\", \"${GLOB_RULE}\", \"${GREP_RULE}\", \"${TILDE_READ_RULE}\", \"${TILDE_EDIT_RULE}\", \"${TILDE_GLOB_RULE}\", \"${TILDE_GREP_RULE}\"] }"
+    echo "  \"permissions\": { \"allow\": [\"${READ_RULE}\", \"${EDIT_RULE}\", \"${GREP_RULE}\", \"${TILDE_READ_RULE}\", \"${TILDE_EDIT_RULE}\", \"${TILDE_GREP_RULE}\"] }"
     return
   fi
 
-  python3 - "${SETTINGS_FILE}" "${READ_RULE}" "${EDIT_RULE}" "${GLOB_RULE}" "${GREP_RULE}" "${TILDE_READ_RULE}" "${TILDE_EDIT_RULE}" "${TILDE_GLOB_RULE}" "${TILDE_GREP_RULE}" <<'PYEOF'
+  python3 - "${SETTINGS_FILE}" "${READ_RULE}" "${EDIT_RULE}" "${GREP_RULE}" "${TILDE_READ_RULE}" "${TILDE_EDIT_RULE}" "${TILDE_GREP_RULE}" <<'PYEOF'
 import json, os, sys
 
 settings_file = sys.argv[1]
