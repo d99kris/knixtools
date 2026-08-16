@@ -144,6 +144,7 @@ if [[ "${DOC}" == "1" ]]; then
   mkman "7zopen" "7-Zip open"
   mkman "7zpass" "7-Zip pass"
   mkman "agentusage" "persist coding agent transcripts between sessions"
+  mkman "arch-claude" "archive a claude code transcript as markdown"
   mkman "commoncrawl" "query common crawl cdx index"
   mkman "nspell-gpt" "terminal-based spell checking using chatgpt"
   mkman "tenv" "toggle python virtual environment"

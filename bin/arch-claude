@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+
+# Copyright (c) 2026 Kristofer Berggren
+# All rights reserved.
+#
+# arch-claude is distributed under the MIT license.
+
+"""Archive a Claude Code session transcript (JSONL) as Markdown.
+
+Designed to be run from a Claude Code SessionEnd hook: the hook payload is
+read from stdin as JSON and provides the transcript path and cwd. It can
+also be run manually (e.g. for testing) via --transcript.
+
+By default the archive keeps the conversation (your messages and the
+assistant's replies) plus a one-line breadcrumb per tool call, but omits
+tool output and assistant reasoning. Use --with-tool-output / --with-thinking
+to include those.
+"""
+
+import argparse
+import datetime
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+
+ARCH_VER = "0.02"
+
+# User-message content wrapped in these tags is command/system noise, not a
+# real user turn, and is skipped.
+NOISE_TAGS = ("<command-name>", "<command-message>", "<command-args>",
+              "<local-command-stdout>", "<local-command-stderr>",
+              "<user-prompt-submit-hook>")
+
+
+def eprint(*a):
+    print(*a, file=sys.stderr)
+
+
+def slugify(text, maxlen=60):
+    text = (text or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    if len(text) > maxlen:
+        text = text[:maxlen].rstrip("-")
+    return text or "session"
+
+
+def parse_ts(s):
+    if not s:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def read_jsonl(path):
+    rows = []
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                continue
+    return rows
+
+
+def project_name(cwd):
+    if cwd:
+        try:
+            r = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+                               capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and r.stdout.strip():
+                return os.path.basename(r.stdout.strip())
+        except Exception:
+            pass
+        return os.path.basename(os.path.abspath(cwd))
+    return "unknown"
+
+
+def fence(text, lang=""):
+    if not isinstance(text, str):
+        text = json.dumps(text, indent=2, ensure_ascii=False)
+    longest = max((len(m.group(0)) for m in re.finditer(r"`+", text)), default=0)
+    bar = "`" * max(3, longest + 1)
+    return f"{bar}{lang}\n{text}\n{bar}"
+
+
+def crop(text, cap):
+    """Keep head + tail, line-aligned, dropping the middle with a marker."""
+    if cap <= 0 or len(text) <= cap:
+        return text
+    half = cap // 2
+    head = text[:half]
+    head = head[:head.rfind("\n") + 1] if "\n" in head else head
+    tail = text[-half:]
+    tail = tail[tail.find("\n") + 1:] if "\n" in tail else tail
+    omitted = len(text) - len(head) - len(tail)
+    lines = text.count("\n") - head.count("\n") - tail.count("\n")
+    return f"{head}\n... [{omitted:,} bytes / {lines:,} lines omitted] ...\n{tail}"
+
+
+def tool_result_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict):
+                parts.append(b.get("text", "") if b.get("type") == "text"
+                             else json.dumps(b, ensure_ascii=False))
+            else:
+                parts.append(str(b))
+        return "\n".join(parts)
+    return json.dumps(content, ensure_ascii=False)
+
+
+def breadcrumb_target(name, inp):
+    if not isinstance(inp, dict):
+        return ""
+    if name == "Bash":
+        cmd = inp.get("command") or ""
+        target = cmd.splitlines()[0] if cmd else ""
+    elif name in ("Read", "Edit", "Write", "MultiEdit"):
+        target = inp.get("file_path") or ""
+    elif name == "NotebookEdit":
+        target = inp.get("notebook_path") or ""
+    elif name == "Grep":
+        target = inp.get("pattern") or ""
+        if inp.get("path"):
+            target += f"  ({inp['path']})"
+    elif name == "Glob":
+        target = inp.get("pattern") or ""
+    elif name == "WebFetch":
+        target = inp.get("url") or ""
+    elif name == "WebSearch":
+        target = inp.get("query") or ""
+    elif name in ("Task", "Agent"):
+        target = inp.get("description") or inp.get("subagent_type") or ""
+    elif name == "Skill":
+        target = inp.get("skill") or ""
+    else:
+        target = next((v for v in inp.values() if isinstance(v, str) and v), "")
+    target = " ".join(target.split()).replace("`", "'")
+    if len(target) > 160:
+        target = target[:160] + "…"
+    return target
+
+
+def render(rows, opts):
+    # Metadata + tool_use_id -> is_error map.
+    ai_title = branch = started = first_user = None
+    errmap = {}
+    for d in rows:
+        t = d.get("type")
+        if t == "ai-title" and not ai_title:
+            ai_title = d.get("aiTitle")
+        if t in ("user", "assistant"):
+            if branch is None and d.get("gitBranch"):
+                branch = d.get("gitBranch")
+            ts = parse_ts(d.get("timestamp"))
+            if ts and started is None:
+                started = ts
+            c = d.get("message", {}).get("content")
+            if t == "user" and first_user is None and isinstance(c, str):
+                s = c.strip()
+                if not any(tag in s for tag in NOISE_TAGS) and not (s.startswith("<") and s.endswith(">")):
+                    first_user = s
+            if isinstance(c, list):
+                for b in c:
+                    if isinstance(b, dict) and b.get("type") == "tool_result":
+                        errmap[b.get("tool_use_id")] = bool(b.get("is_error"))
+
+    title = ai_title or (first_user[:80] if first_user else "Claude Session")
+
+    out = [f"# {title}", "", "## Session Info",
+           f"- Date: {started.astimezone().strftime('%Y-%m-%d %H:%M') if started else 'unknown'}"]
+    if branch:
+        out.append(f"- Branch: `{branch}`")
+    out += ["", "## Transcript", ""]
+
+    speaker = None
+
+    def header(who):
+        nonlocal speaker
+        if who != speaker:
+            out.append(f"### {who}")
+            out.append("")
+            speaker = who
+
+    def is_noise(s):
+        s = s.strip()
+        return (not s) or any(tag in s for tag in NOISE_TAGS) or (s.startswith("<") and s.endswith(">"))
+
+    for d in rows:
+        t = d.get("type")
+        if t not in ("user", "assistant"):
+            continue
+        if d.get("isSidechain") and not opts.include_sidechains:
+            continue
+        content = d.get("message", {}).get("content")
+
+        if t == "user":
+            if isinstance(content, str):
+                if is_noise(content):
+                    continue
+                header("User")
+                out += [content.strip(), ""]
+                continue
+            if isinstance(content, list):
+                texts = [b.get("text", "") for b in content
+                         if isinstance(b, dict) and b.get("type") == "text"]
+                joined = "\n".join(x for x in texts if x).strip()
+                if joined and not is_noise(joined):
+                    header("User")
+                    out += [joined, ""]
+                if opts.tool_output:
+                    for b in content:
+                        if isinstance(b, dict) and b.get("type") == "tool_result":
+                            header("Assistant")
+                            body = crop(tool_result_text(b.get("content")), opts.max_tool)
+                            tag = " (error)" if b.get("is_error") else ""
+                            out += [f"Tool result{tag}:", "", fence(body), ""]
+            continue
+
+        # assistant
+        if isinstance(content, str):
+            if content.strip():
+                header("Assistant")
+                out += [content.strip(), ""]
+            continue
+        if isinstance(content, list):
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                bt = b.get("type")
+                if bt == "text":
+                    if b.get("text", "").strip():
+                        header("Assistant")
+                        out += [b["text"].strip(), ""]
+                elif bt == "thinking" and opts.thinking:
+                    if b.get("thinking", "").strip():
+                        header("Assistant")
+                        out += ["<details><summary>Thinking</summary>", "",
+                                b["thinking"].strip(), "", "</details>", ""]
+                elif bt == "tool_use":
+                    header("Assistant")
+                    name = b.get("name", "tool")
+                    tgt = breadcrumb_target(name, b.get("input", {}))
+                    err = " (error)" if errmap.get(b.get("id")) else ""
+                    out.append(f"→ {name} `{tgt}`{err}" if tgt else f"→ {name}{err}")
+                    out.append("")
+
+    return "\n".join(out).rstrip() + "\n"
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        prog="arch-claude",
+        description="Archive a Claude Code session transcript (JSONL) as Markdown.")
+    ap.add_argument("-s", "--store", metavar="DIR", help="archive root directory")
+    ap.add_argument("-t", "--transcript", metavar="PATH",
+                    help="transcript JSONL path (default: read hook JSON from stdin)")
+    ap.add_argument("--cwd", metavar="DIR", help="project working dir (else from hook/transcript)")
+    ap.add_argument("--stdout", action="store_true", help="write Markdown to stdout, not a file")
+    ap.add_argument("--with-thinking", dest="thinking", action="store_true",
+                    help="include assistant reasoning (thinking) blocks")
+    ap.add_argument("--with-tool-output", dest="tool_output", action="store_true",
+                    help="include tool output (cropped), not just call breadcrumbs")
+    ap.add_argument("--max-tool", type=int, default=8192, metavar="N",
+                    help="with --with-tool-output, crop each result to N chars head+tail (0=unlimited)")
+    ap.add_argument("--include-sidechains", action="store_true",
+                    help="include subagent (sidechain) transcripts")
+    ap.add_argument("-v", "--version", action="version",
+                    version=f"arch-claude v{ARCH_VER}")
+    opts = ap.parse_args()
+
+    transcript, cwd = opts.transcript, opts.cwd
+    if not transcript:
+        try:
+            payload = json.load(sys.stdin)
+        except Exception as e:
+            eprint(f"arch-claude: no --transcript and could not read hook JSON: {e}")
+            return 0  # never break the session
+        transcript = payload.get("transcript_path")
+        cwd = cwd or payload.get("cwd")
+
+    if not transcript or not os.path.exists(transcript):
+        eprint(f"arch-claude: transcript not found: {transcript}")
+        return 0
+
+    rows = read_jsonl(transcript)
+    if not rows:
+        eprint("arch-claude: empty transcript, nothing to archive")
+        return 0
+
+    if not cwd:
+        cwd = next((d["cwd"] for d in rows if d.get("cwd")), None)
+
+    md = render(rows, opts)
+
+    if opts.stdout or not opts.store:
+        sys.stdout.write(md)
+        return 0
+
+    proj = project_name(cwd)
+    ai_title = next((d.get("aiTitle") for d in rows if d.get("type") == "ai-title"), None)
+    session_id = (next((d.get("sessionId") for d in rows if d.get("sessionId")), None)
+                  or next((d.get("session_id") for d in rows if d.get("session_id")), None))
+    first_ts = next((parse_ts(d.get("timestamp")) for d in rows if parse_ts(d.get("timestamp"))), None)
+    stamp = (first_ts.astimezone() if first_ts else datetime.datetime.now()).strftime("%Y%m%d-%H%M%S")
+
+    outdir = os.path.join(opts.store, proj)
+    os.makedirs(outdir, exist_ok=True)
+    outpath = os.path.join(outdir, f"{stamp}-{slugify(ai_title)}.md")
+
+    # A resumed session appends to the same transcript, so this may re-archive a
+    # session whose title (and thus slug) drifted since the last exit. Stamp the
+    # output with the session id and drop any prior archive of THIS session so we
+    # keep exactly one, always-current file per session. Matched by embedded id,
+    # so a manual /save file or another session is never touched.
+    marker = f"<!-- arch-claude session={session_id} -->" if session_id else None
+    if marker:
+        md = md.rstrip("\n") + f"\n\n{marker}\n"
+        for prev in glob.glob(os.path.join(outdir, f"{stamp}-*.md")):
+            if prev == outpath:
+                continue
+            try:
+                with open(prev, encoding="utf-8", errors="replace") as pf:
+                    if marker in pf.read():
+                        os.remove(prev)
+            except Exception:
+                pass
+
+    with open(outpath, "w", encoding="utf-8") as f:
+        f.write(md)
+    eprint(f"arch-claude: wrote {outpath}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as e:
+        eprint(f"arch-claude: {e}")
+        sys.exit(0)  # never break the session

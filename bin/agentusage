@@ -7,21 +7,29 @@
 
 set -euo pipefail
 
-AU_VER="0.09"
+AU_VER="0.10"
+
+AU_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 help()
 {
   echo "Agentusage is a small utility to set up Claude Code slash commands"
-  echo "(/save and /load) for persisting session transcripts across projects"
-  echo "in a single directory."
+  echo "(/save and /load) and an automatic SessionEnd archiving hook for"
+  echo "persisting session transcripts across projects in a single directory."
   echo ""
   echo "Usage: agentusage --setup <store-dir>"
+  echo "   or: agentusage --disable-hook"
   echo "   or: agentusage --help"
   echo "   or: agentusage --version"
   echo ""
   echo "Options:"
   echo "   -s, --setup <dir>  set up agentusage with given store directory,"
-  echo "                      where it will store agent transcripts."
+  echo "                      where it will store agent transcripts. Installs"
+  echo "                      the /save, /load, /draft and /cpp-review commands"
+  echo "                      and registers a SessionEnd hook that auto-archives"
+  echo "                      each session to the store via arch-claude."
+  echo "       --disable-hook remove the SessionEnd auto-archiving hook (leaves"
+  echo "                      slash commands and permissions in place)."
   echo "   -h, --help         display this help and exit"
   echo "   -v, --version      output version information and exit"
 }
@@ -65,6 +73,10 @@ main()
           setup "${1}"
           shift
         fi
+        ;;
+
+      --disable-hook)
+        disable_hook
         ;;
 
       *)
@@ -131,6 +143,133 @@ if changed:
     print("Updated " + settings_file + " with permissions for store directory")
 else:
     print("Permissions already configured in " + settings_file)
+PYEOF
+}
+
+resolve_arch_claude()
+{
+  if [[ -x "${AU_DIR}/arch-claude" ]]; then
+    echo "${AU_DIR}/arch-claude"
+  elif command -v arch-claude &>/dev/null; then
+    command -v arch-claude
+  else
+    echo ""
+  fi
+}
+
+configure_hook()
+{
+  local STOREDIR="${1}"
+  local ARCH="${2}"
+  local SETTINGS_FILE="${HOME}/.claude/settings.json"
+
+  if [[ -z "${ARCH}" ]]; then
+    echo "Note: arch-claude not found next to agentusage or in PATH. Skipping"
+    echo "      SessionEnd hook. Install arch-claude (e.g. 'make.sh install')"
+    echo "      then re-run --setup to enable automatic archiving."
+    return
+  fi
+
+  if ! command -v python3 &>/dev/null; then
+    echo "Note: python3 not found; cannot register SessionEnd hook. To enable"
+    echo "      it, add a SessionEnd command hook running:"
+    echo "        ${ARCH} --store ${STOREDIR}"
+    return
+  fi
+
+  python3 - "${SETTINGS_FILE}" "${ARCH}" "${STOREDIR}" <<'PYEOF'
+import json, os, shlex, sys
+
+settings_file, arch, store = sys.argv[1], sys.argv[2], sys.argv[3]
+
+data = {}
+if os.path.exists(settings_file):
+    with open(settings_file) as f:
+        data = json.load(f)
+
+cmd = f"{shlex.quote(arch)} --store {shlex.quote(store)}"
+sessionend = data.setdefault('hooks', {}).setdefault('SessionEnd', [])
+
+def is_ours(h):
+    return isinstance(h, dict) and 'arch-claude' in (h.get('command') or '')
+
+found = updated = False
+for block in sessionend:
+    if not isinstance(block, dict):
+        continue
+    for h in block.get('hooks', []):
+        if is_ours(h):
+            found = True
+            if h.get('command') != cmd or h.get('timeout') != 60:
+                h['command'], h['timeout'] = cmd, 60
+                updated = True
+if not found:
+    sessionend.append({'hooks': [{'type': 'command', 'command': cmd, 'timeout': 60}]})
+    updated = True
+
+if updated:
+    with open(settings_file, 'w') as f:
+        json.dump(data, f, indent=2)
+        f.write('\n')
+    print("Registered SessionEnd archiving hook in " + settings_file)
+else:
+    print("SessionEnd archiving hook already configured in " + settings_file)
+PYEOF
+}
+
+disable_hook()
+{
+  local SETTINGS_FILE="${HOME}/.claude/settings.json"
+
+  if [[ ! -f "${SETTINGS_FILE}" ]]; then
+    echo "No settings file at ${SETTINGS_FILE}; nothing to disable."
+    return
+  fi
+
+  if ! command -v python3 &>/dev/null; then
+    exiterr "python3 not found; cannot edit ${SETTINGS_FILE}"
+  fi
+
+  python3 - "${SETTINGS_FILE}" <<'PYEOF'
+import json, sys
+
+settings_file = sys.argv[1]
+with open(settings_file) as f:
+    data = json.load(f)
+
+hooks = data.get('hooks', {})
+sessionend = hooks.get('SessionEnd', [])
+
+def is_ours(h):
+    return isinstance(h, dict) and 'arch-claude' in (h.get('command') or '')
+
+removed = 0
+kept_blocks = []
+for block in sessionend:
+    if isinstance(block, dict) and 'hooks' in block:
+        kept = [h for h in block['hooks'] if not is_ours(h)]
+        removed += len(block['hooks']) - len(kept)
+        if kept:
+            block['hooks'] = kept
+            kept_blocks.append(block)
+    else:
+        kept_blocks.append(block)
+
+if kept_blocks:
+    hooks['SessionEnd'] = kept_blocks
+else:
+    hooks.pop('SessionEnd', None)
+if not hooks:
+    data.pop('hooks', None)
+
+with open(settings_file, 'w') as f:
+    json.dump(data, f, indent=2)
+    f.write('\n')
+
+if removed:
+    print(f"Removed {removed} arch-claude SessionEnd hook(s) from {settings_file}")
+else:
+    print("No arch-claude SessionEnd hook found; nothing to disable.")
 PYEOF
 }
 
@@ -294,6 +433,8 @@ Where:
 
 Order findings most severe first. End with a summary line with an overall assessment.
 EOF
+
+  configure_hook "${STOREDIR}" "$(resolve_arch_claude)"
 }
 
 main "${@:-}"

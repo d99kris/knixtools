@@ -23,6 +23,7 @@ Tools Listing
 |--------------|--------------------------|-----------------------------|--------------------------------|
 | 7zetools     | [dir](/bin)              | [doc](/doc/7zetools.md)     | 7-Zip encryption tools         |
 | agentusage   | [src](/bin/agentusage)   | -                           | Coding agent transcript store  |
+| arch-claude  | [src](/bin/arch-claude)  | -                           | Claude transcript to markdown  |
 | cvc          | [src](/bin/cvc)          | -                           | Git / Subversion wrapper       |
 | liveinstall  | [src](/bin/liveinstall)  | [doc](/doc/liveinstall.md)  | Linux live-cd installer        |
 | nspell-gpt   | [src](/bin/nspell-gpt)   | [doc](/doc/nspell-gpt.md)   | Spell check using OpenAI GPT   |
