@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+
+# put-dotfiles - update dotfiles bin scripts from knixtools copy
+#
+# Copies files from bin/ to ../dotfiles/common/bin
+
+set -e
+
+# Run from repository root (parent of this script's utils/ dir).
+cd "$(dirname "${0}")/.."
+
+SRC="bin"
+DST="../dotfiles/common/bin"
+
+if [[ ! -d "${DST}" ]]; then
+  echo "put-dotfiles: ${DST} not found, skipping"
+  exit 0
+fi
+
+for SRCFILE in "${SRC}"/*; do
+  NAME="$(basename "${SRCFILE}")"
+  DSTFILE="${DST}/${NAME}"
+  if ! cmp -s "${SRCFILE}" "${DSTFILE}"; then
+    cp "${SRCFILE}" "${DSTFILE}"
+    echo "updated ${NAME}"
+  fi
+done
