@@ -323,7 +323,7 @@ def main():
     # session whose title (and thus slug) drifted since the last exit. Stamp the
     # output with the session id and drop any prior archive of THIS session so we
     # keep exactly one, always-current file per session. Matched by embedded id,
-    # so a manual /save file or another session is never touched.
+    # so a hand-authored file or another session is never touched.
     marker = f"<!-- arch-claude session={session_id} -->" if session_id else None
     if marker:
         md = md.rstrip("\n") + f"\n\n{marker}\n"

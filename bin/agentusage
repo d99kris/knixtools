@@ -7,15 +7,15 @@
 
 set -euo pipefail
 
-AU_VER="0.10"
+AU_VER="0.11"
 
 AU_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 help()
 {
   echo "Agentusage is a small utility to set up Claude Code slash commands"
-  echo "(/save and /load) and an automatic SessionEnd archiving hook for"
-  echo "persisting session transcripts across projects in a single directory."
+  echo "(/draft and /cpp-review) and an automatic SessionEnd archiving hook"
+  echo "for persisting session transcripts across projects in a single directory."
   echo ""
   echo "Usage: agentusage --setup <store-dir>"
   echo "   or: agentusage --disable-hook"
@@ -25,7 +25,7 @@ help()
   echo "Options:"
   echo "   -s, --setup <dir>  set up agentusage with given store directory,"
   echo "                      where it will store agent transcripts. Installs"
-  echo "                      the /save, /load, /draft and /cpp-review commands"
+  echo "                      the /draft and /cpp-review commands"
   echo "                      and registers a SessionEnd hook that auto-archives"
   echo "                      each session to the store via arch-claude."
   echo "       --disable-hook remove the SessionEnd auto-archiving hook (leaves"
@@ -273,6 +273,26 @@ else:
 PYEOF
 }
 
+remove_deprecated_commands()
+{
+  # The /save and /load commands were deprecated in v0.11 (superseded by the
+  # SessionEnd auto-archiving hook). Prompt to remove any previously installed
+  # command files. This migration cleanup can be dropped in a future release.
+  local CMD FILE REPLY
+  for CMD in save load; do
+    FILE="${HOME}/.claude/commands/${CMD}.md"
+    [[ -f "${FILE}" ]] || continue
+    REPLY=""
+    read -r -p "Delete deprecated command ${FILE}? [y/N] " REPLY || true
+    if [[ "${REPLY}" =~ ^[Yy]$ ]]; then
+      rm -f "${FILE}"
+      echo "Deleted ${FILE}"
+    else
+      echo "Keeping ${FILE}"
+    fi
+  done
+}
+
 setup()
 {
   STOREDIR="${1}"
@@ -286,83 +306,7 @@ setup()
 
   configure_permissions "${STOREDIR}"
 
-  tee "${HOME}/.claude/commands/save.md" > /dev/null <<EOF
-Save a session transcript for future agents/sessions.
-
-## Steps
-
-1. Run \`date +%Y%m%d-%H%M%S\` to get the current date and time.
-
-2. Determine the current project name by running \`git rev-parse --show-toplevel | xargs basename\`.
-
-3. Derive a short kebab-case topic slug from the main subject of this session
-   (e.g. \`thread-safety-analysis\`, \`startup-performance-improvements\`).
-
-4. Compose the filename: \`${STOREDIR}/<projectname>/YYYYMMDD-HHMMSS-<slug>.md\` using the date-time from step 1 and project name from step 2.
-
-5. Write a full session transcript to the path from step 4 using the Write tool (it creates parent directories automatically).
-   Reproduce the entire conversation as completely and verbatim as possible.
-   Do not include secrets, credentials, or API keys — redact them as \`[REDACTED]\`.
-
-   Format the transcript as follows:
-
-   \`\`\`
-   # <Title>
-
-   ## Session Info
-   - Date: YYYY-MM-DD
-   - Branch: \`<branch-name>\`
-
-   ## Transcript
-
-   ### User
-   <user message, verbatim>
-
-   ### Assistant
-   <assistant response, verbatim — include tool calls and their results>
-
-   ### User
-   <next user message>
-
-   ...and so on for the entire conversation.
-   \`\`\`
-
-   Guidelines:
-   - Preserve the full content of each message — do not summarize or abbreviate.
-   - Include tool invocations and their results (file reads, bash commands, edits, etc.)
-     as fenced code blocks with the tool name, e.g. \`\`\`bash\`, \`\`\`read\`, etc.
-   - For /load and /save commands, only log the final output reported to the user,
-     not the intermediate tool calls (git pulls, file reads, mkdir, etc.).
-   - If earlier parts of the conversation have been compressed or truncated by the
-     system, reproduce what is available and note \`[earlier context compressed]\`
-     at the top.
-   - There is no length limit — capture the full session.
-
-6. Report the saved filename to the user.
-EOF
-
-  tee "${HOME}/.claude/commands/load.md" > /dev/null <<EOF
-Load session transcripts, optionally filtered by keyword(s).
-
-## Steps
-
-1. Determine the current project name by running \`git rev-parse --show-toplevel | xargs basename\`.
-
-2. Use the Glob tool to find all \`.md\` files in \`${STOREDIR}/<projectname>/\`
-   (pattern: \`*.md\`, path: \`${STOREDIR}/<projectname>\`).
-   IMPORTANT: Use the exact absolute path above — do not shorten it with ~ or \$HOME.
-   If no files are found, inform the user that no session transcripts exist for this
-   project yet and suggest using /save to create one.
-
-3. If \`\$ARGUMENTS\` is non-empty, use the Grep tool to search for documents matching the words
-   in \`${STOREDIR}/<projectname>/\`. Use the exact absolute path — do not use ~ or \$HOME.
-   Take the 5 most recent matches and read them for context.
-
-4. If \`\$ARGUMENTS\` is empty:
-   - If there are more than 5 documents, list them by filename and ask the user
-     which ones to load, or offer to load the 5 most recent.
-   - Otherwise, read all found documents for context.
-EOF
+  remove_deprecated_commands
 
   tee "${HOME}/.claude/commands/draft.md" > /dev/null <<'EOF'
 Draft a commit message for the current changeset. Do NOT commit — this is
