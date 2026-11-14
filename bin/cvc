@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# cvc v0.29
+# cvc v0.30
 #
 # Copyright (c) 2018-2026 Kristofer Berggren
 # All rights reserved.
@@ -566,6 +566,7 @@ git_sync()
       echo "Copy/Upd: ${SRCPATH} -> ${DSTPATH}"
       if [[ "${DRYRUN}" != "1" ]]; then
         cp ${SRCPATH} ${DSTPATH}
+        git add ${DSTPATH}
       fi
     else
       echo "warning: unknown diff output (${LINE}), ignoring."
